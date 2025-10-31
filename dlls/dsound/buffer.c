@@ -33,6 +33,8 @@
 #include "dsound_private.h"
 #include "dsconf.h"
 
+#define SPEEDUP 2.0
+
 WINE_DEFAULT_DEBUG_CHANNEL(dsound);
 
 /*******************************************************************************
@@ -264,6 +266,7 @@ static HRESULT WINAPI IDirectSoundBufferImpl_SetFrequency(IDirectSoundBuffer8 *i
 {
         IDirectSoundBufferImpl *This = impl_from_IDirectSoundBuffer8(iface);
 	DWORD oldFreq;
+	DWORD actual_freq; /* MODIFICATION */
 
 	TRACE("(%p,%ld)\n",This,freq);
 
@@ -285,17 +288,22 @@ static HRESULT WINAPI IDirectSoundBufferImpl_SetFrequency(IDirectSoundBuffer8 *i
 		return DSERR_INVALIDPARAM;
 	}
 
+	/* MODIFICATION: Double the requested frequency for internal use */
+	actual_freq = freq * 2;
+	if (actual_freq > DSBFREQUENCY_MAX) actual_freq = DSBFREQUENCY_MAX;
+	/* END MODIFICATION */
+
 	AcquireSRWLockExclusive(&This->lock);
 
 	if (This->dsbd.dwFlags & DSBCAPS_CTRL3D) {
 		oldFreq = This->ds3db_freq;
-		This->ds3db_freq = freq;
-		if (freq != oldFreq)
+		This->ds3db_freq = actual_freq; /* MODIFICATION */
+		if (actual_freq != oldFreq) /* MODIFICATION */
 			DSOUND_Calc3DBuffer(This);
 	} else {
 		oldFreq = This->freq;
-		This->freq = freq;
-		if (freq != oldFreq)
+		This->freq = actual_freq; /* MODIFICATION */
+		if (actual_freq != oldFreq) /* MODIFICATION */
 			DSOUND_RecalcFormat(This);
 	}
 
@@ -704,6 +712,7 @@ static HRESULT WINAPI IDirectSoundBufferImpl_Restore(IDirectSoundBuffer8 *iface)
 static HRESULT WINAPI IDirectSoundBufferImpl_GetFrequency(IDirectSoundBuffer8 *iface, DWORD *freq)
 {
         IDirectSoundBufferImpl *This = impl_from_IDirectSoundBuffer8(iface);
+	DWORD actual_freq; /* MODIFICATION */
 
 	TRACE("(%p,%p)\n",This,freq);
 
@@ -712,7 +721,11 @@ static HRESULT WINAPI IDirectSoundBufferImpl_GetFrequency(IDirectSoundBuffer8 *i
 		return DSERR_INVALIDPARAM;
 	}
 
-	*freq = (This->dsbd.dwFlags & DSBCAPS_CTRL3D) ? This->ds3db_freq : This->freq;
+	/* MODIFICATION: Report half of the actual internal frequency to the application */
+	actual_freq = (This->dsbd.dwFlags & DSBCAPS_CTRL3D) ? This->ds3db_freq : This->freq;
+	*freq = actual_freq / 2;
+	/* END MODIFICATION */
+
 	TRACE("-> %ld\n", *freq);
 
 	return DS_OK;
@@ -1078,7 +1091,12 @@ HRESULT secondarybuffer_create(DirectSoundDevice *device, const DSBUFFERDESC *ds
 	else
 		dsb->buflen = dsbd->dwBufferBytes;
 
-	dsb->freq = dsbd->lpwfxFormat->nSamplesPerSec;
+	// dsb->freq = dsbd->lpwfxFormat->nSamplesPerSec;
+	/* MODIFICATION: Double the initial playback frequency */
+	dsb->freq = dsbd->lpwfxFormat->nSamplesPerSec * 2;
+	if (dsb->freq > DSBFREQUENCY_MAX) dsb->freq = DSBFREQUENCY_MAX;
+	/* END MODIFICATION */
+
 	dsb->notifies = NULL;
 	dsb->nrofnotifies = 0;
 
@@ -1130,7 +1148,12 @@ HRESULT secondarybuffer_create(DirectSoundDevice *device, const DSBUFFERDESC *ds
 		dsb->ds3db_ds3db.flMaxDistance = DS3D_DEFAULTMAXDISTANCE;
 		dsb->ds3db_ds3db.dwMode = DS3DMODE_NORMAL;
 
-		dsb->ds3db_freq = dsbd->lpwfxFormat->nSamplesPerSec;
+		// dsb->ds3db_freq = dsbd->lpwfxFormat->nSamplesPerSec;
+
+		/* MODIFICATION: Double the initial playback frequency for 3D buffers */
+		dsb->ds3db_freq = dsbd->lpwfxFormat->nSamplesPerSec * 2;
+		if (dsb->ds3db_freq > DSBFREQUENCY_MAX) dsb->ds3db_freq = DSBFREQUENCY_MAX;
+		/* END MODIFICATION */
 
 		dsb->ds3db_need_recalc = FALSE;
 		DSOUND_Calc3DBuffer(dsb);
