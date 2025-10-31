@@ -37,6 +37,8 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(mmdevapi);
 
+#define SPEEDUP 2.0
+
 typedef struct tagLANGANDCODEPAGE
 {
     WORD wLanguage;
@@ -375,6 +377,8 @@ static HRESULT stream_init(struct audio_client *client, const BOOLEAN force_def_
     UINT32 i, channel_count;
     stream_handle stream;
     WCHAR *name;
+    WAVEFORMATEX *modified_fmt = NULL;
+    size_t fmt_size;
 
     if (!fmt)
         return E_POINTER;
@@ -447,19 +451,35 @@ static HRESULT stream_init(struct audio_client *client, const BOOLEAN force_def_
         return params.result;
     }
 
+    /* === 开始修改 === */
+    fmt_size = sizeof(WAVEFORMATEX) + fmt->cbSize;
+    if (!(modified_fmt = malloc(fmt_size)))
+    {
+        sessions_unlock();
+        return E_OUTOFMEMORY;
+    }
+    memcpy(modified_fmt, fmt, fmt_size);
+
+    modified_fmt->nSamplesPerSec = (DWORD)((double)modified_fmt->nSamplesPerSec * SPEEDUP);
+    modified_fmt->nAvgBytesPerSec = (DWORD)((double)modified_fmt->nAvgBytesPerSec * SPEEDUP);
+    /* === 结束修改 === */
+
     params.name = name   = get_application_name();
     params.device        = client->device_name;
     params.flow          = client->dataflow;
     params.share         = mode;
     params.flags         = flags;
-    params.duration      = duration;
-    params.period        = period;
-    params.fmt           = fmt;
+    /* === 开始修改: 使用调整后的时长和周期，以及修改后的格式 === */
+    params.duration      = (REFERENCE_TIME)((double)duration / SPEEDUP);
+    params.period        = (REFERENCE_TIME)((double)period / SPEEDUP);
+    params.fmt           = modified_fmt;
+    /* === 结束修改 === */
     params.channel_count = &channel_count;
     params.stream        = &stream;
 
     wine_unix_call(create_stream, &params);
 
+    free(modified_fmt); /* 释放我们创建的副本 */
     free(name);
 
     if (FAILED(params.result)) {
@@ -757,16 +777,30 @@ static HRESULT WINAPI client_IsFormatSupported(IAudioClient3 *iface, AUDCLNT_SHA
 {
     struct audio_client *This = impl_from_IAudioClient3(iface);
     struct is_format_supported_params params;
+    WAVEFORMATEX *modified_fmt = NULL;
+    size_t fmt_size;
 
     TRACE("(%p)->(%x, %p, %p)\n", This, mode, fmt, out);
 
     if (fmt)
         dump_fmt(fmt);
 
+    /* === 开始修改 === */
+    if (fmt)
+    {
+        fmt_size = sizeof(WAVEFORMATEX) + fmt->cbSize;
+        if (!(modified_fmt = malloc(fmt_size)))
+            return E_OUTOFMEMORY;
+        memcpy(modified_fmt, fmt, fmt_size);
+        modified_fmt->nSamplesPerSec = (DWORD)((double)modified_fmt->nSamplesPerSec * SPEEDUP);
+        modified_fmt->nAvgBytesPerSec = (DWORD)((double)modified_fmt->nAvgBytesPerSec * SPEEDUP);
+    }
+    /* === 结束修改 === */
+
     params.device  = This->device_name;
     params.flow    = This->dataflow;
     params.share   = mode;
-    params.fmt_in  = fmt;
+    params.fmt_in  = modified_fmt ? modified_fmt : fmt;
     params.fmt_out = NULL;
 
     if (out) {
@@ -777,8 +811,19 @@ static HRESULT WINAPI client_IsFormatSupported(IAudioClient3 *iface, AUDCLNT_SHA
 
     wine_unix_call(is_format_supported, &params);
 
+    free(modified_fmt);
+
     if (params.result == S_FALSE)
+    {
+        /* === 开始修改: 将驱动建议的格式转换回正常速率 === */
+        if (params.fmt_out)
+        {
+            params.fmt_out->Format.nSamplesPerSec = (DWORD)((double)params.fmt_out->Format.nSamplesPerSec / SPEEDUP);
+            params.fmt_out->Format.nAvgBytesPerSec = (DWORD)((double)params.fmt_out->Format.nAvgBytesPerSec / SPEEDUP);
+        }
+        /* === 结束修改 === */
         *out = &params.fmt_out->Format;
+    }
     else
         CoTaskMemFree(params.fmt_out);
 
@@ -806,6 +851,10 @@ static HRESULT WINAPI client_GetMixFormat(IAudioClient3 *iface, WAVEFORMATEX **p
     wine_unix_call(get_mix_format, &params);
 
     if (SUCCEEDED(params.result)) {
+        /* === 开始修改 === */
+        params.fmt->Format.nSamplesPerSec = (DWORD)((double)params.fmt->Format.nSamplesPerSec / SPEEDUP);
+        params.fmt->Format.nAvgBytesPerSec = (DWORD)((double)params.fmt->Format.nAvgBytesPerSec / SPEEDUP);
+        /* === 结束修改 === */
         *pwfx = &params.fmt->Format;
         dump_fmt(*pwfx);
     } else
