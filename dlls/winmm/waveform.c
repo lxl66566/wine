@@ -45,6 +45,8 @@
 
 #include "wine/debug.h"
 
+#define SPEEDUP 2.0
+
 WINE_DEFAULT_DEBUG_CHANNEL(winmm);
 
 /* HWAVE (and HMIXER) format:
@@ -891,6 +893,8 @@ static MMRESULT WINMM_TryDeviceMapping(WINMM_Device *device, WAVEFORMATEX *fmt,
     target.wFormatTag = WAVE_FORMAT_PCM;
     target.nChannels = channels;
     target.nSamplesPerSec = freq;
+    if (is_out)
+        target.nSamplesPerSec = (DWORD)(target.nSamplesPerSec * SPEEDUP);
     target.wBitsPerSample = bits_per_samp;
     target.nBlockAlign = (target.nChannels * target.wBitsPerSample) / 8;
     target.nAvgBytesPerSec = target.nSamplesPerSec * target.nBlockAlign;
@@ -1131,22 +1135,43 @@ static LRESULT WINMM_OpenDevice(WINMM_Device *device, WINMM_OpenInfo *info,
         goto error;
     }
 
-    hr = IAudioClient_Initialize(device->client, AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_NOPERSIST,
-            AC_BUFLEN, 0, device->orig_fmt, &device->parent->session);
-    if(FAILED(hr)){
-        if(hr == AUDCLNT_E_UNSUPPORTED_FORMAT && !(info->flags & WAVE_FORMAT_DIRECT)){
-            ret = WINMM_MapDevice(device, FALSE, is_out);
-            if(ret != MMSYSERR_NOERROR || info->flags & WAVE_FORMAT_QUERY)
-                goto error;
-        }else{
-            WARN("Initialize failed: %08lx\n", hr);
-            ret = hr2mmr(hr);
-            goto error;
+    {
+        WAVEFORMATEX *init_fmt = device->orig_fmt;
+        WAVEFORMATEX *hw_fmt = NULL;
+
+        /* For output streams, create a sped-up format to initialize the device.
+         * The fallback logic will handle cases where this sped-up format is not supported. */
+        if (is_out)
+        {
+            hw_fmt = alloca(sizeof(WAVEFORMATEX) + device->orig_fmt->cbSize);
+            memcpy(hw_fmt, device->orig_fmt, sizeof(WAVEFORMATEX) + device->orig_fmt->cbSize);
+            hw_fmt->nSamplesPerSec = (DWORD)(hw_fmt->nSamplesPerSec * SPEEDUP);
+            hw_fmt->nAvgBytesPerSec = (DWORD)(hw_fmt->nAvgBytesPerSec * SPEEDUP);
+            init_fmt = hw_fmt;
         }
-    }else{
-        device->bytes_per_frame = device->orig_fmt->nBlockAlign;
-        device->samples_per_sec = device->orig_fmt->nSamplesPerSec;
+
+        hr = IAudioClient_Initialize(device->client, AUDCLNT_SHAREMODE_SHARED,
+                AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_NOPERSIST,
+                AC_BUFLEN, 0, init_fmt, &device->parent->session);
+        if(FAILED(hr)){
+            if(hr == AUDCLNT_E_UNSUPPORTED_FORMAT && !(info->flags & WAVE_FORMAT_DIRECT)){
+                ret = WINMM_MapDevice(device, FALSE, is_out);
+                if(ret != MMSYSERR_NOERROR || info->flags & WAVE_FORMAT_QUERY)
+                    goto error;
+            }else{
+                WARN("Initialize failed: %08lx\n", hr);
+                ret = hr2mmr(hr);
+                goto error;
+            }
+        }else{
+            if (hw_fmt) { /* Direct initialization with sped-up format succeeded */
+                device->bytes_per_frame = hw_fmt->nBlockAlign;
+                device->samples_per_sec = hw_fmt->nSamplesPerSec;
+            } else { /* Direct initialization with original format or ACM fallback succeeded */
+                device->bytes_per_frame = device->orig_fmt->nBlockAlign;
+                device->samples_per_sec = device->orig_fmt->nSamplesPerSec;
+            }
+        }
     }
 
     hr = IAudioClient_GetService(device->client, &IID_IAudioClock,
